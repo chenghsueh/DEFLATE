@@ -9,6 +9,9 @@
 #define HASH_TABLE_MAX_LIST_LEN 20
 #define LZ_MIN_MATCH_LEN 3
 #define STATIC_HUFFMAN_TYPE 1
+#define DYNAMIC_HUFFMAN_TYPE 2
+#define LENS_ENOUGH 852
+#define DISTS_ENOUGH 592
 
 
 int read_bytes = 0;
@@ -17,6 +20,7 @@ typedef struct
     int width;
     int height;
     int stride;
+    int bitsperpixel;
     unsigned char *pdata;
 }BMP ;
 
@@ -59,6 +63,11 @@ typedef struct {
 }Huffman_Table;
 
 typedef struct {
+    int code;
+    int code_len;
+}Huffman_Decode_Table;
+
+typedef struct {
     uint16_t Type;
     uint32_t FileSize;
     int Reserved;
@@ -93,7 +102,7 @@ static const int static_huffman_init_values[4] = {48, 400, 0, 192};
 
 static const unsigned char static_huffman_length[4] = {8, 9, 7, 8};
 
-static const int bl_order[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2 ,4, 1 ,15};
+static const int bl_order[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2 ,14, 1 ,15};
 
 void init_Hash_Table(Hash_chain* table, int max_size)
 {
@@ -116,14 +125,37 @@ void init_Hash_Chain(Hash_chain *entry)
 void init_Huffman_Table(Huffman_Table* lit_table, Huffman_Table* dis_table, Huffman_Table* bl_table)
 {
     int i = 0;
-    for(i = 0; i < 256+1+29; i ++)
+    for(i = 0; i < 256+1+29; i ++){
         lit_table[i].freq = 0;
-    for(i = 0; i < 30; i ++)
+        lit_table[i].code_len = 0;
+    }
+    for(i = 0; i < 30; i ++){
         dis_table[i].freq = 0;
-    for(i = 0; i < 19; i ++)
+        dis_table[i].code_len = 0;
+    }
+    for(i = 0; i < 19; i ++){
         bl_table[i].freq = 0;
+        bl_table[i].code_len = 0;
+    }
 
     lit_table[256].freq = 1;
+}
+
+void init_huffman_decode_table(Huffman_Decode_Table* bl_table, Huffman_Decode_Table* l_table, Huffman_Decode_Table* d_table)
+{
+    int i;
+    for(i = 0; i < LENS_ENOUGH; i ++)
+    {
+        l_table[i].code_len = 0;
+    }
+    for(i = 0; i < DISTS_ENOUGH; i ++)
+    {
+        d_table[i].code_len = 0;
+    }
+    for(i = 0; i < 128; i ++)
+    {
+        bl_table[i].code_len = 0;
+    }
 }
 
 void Huffman_Table_reset(Huffman_Table* lit_table, Huffman_Table* dis_table)
@@ -314,12 +346,21 @@ int bmp_load(BMP *pb, char *file)
     // save the imformation taht we need
     pb->width = header.Width;
     pb->height = header.Height;
-    //pb->stride = (header.Width * 3 + 4 - 1)& ~(4-1); //pixel size * width
+    /*if(header.BitsPerPixel == 24)
+        pb->stride = (header.Width * 3 + 4 - 1)& ~(4-1); //pixel size * width
+    else{
+    int align = ((pb->width*header.BitsPerPixel/8)*3) % 4;
+    pb->stride = pb->width + align;
+    }*/
+    int align = ((pb->width*header.BitsPerPixel/8)*3) % 4;
+    pb->stride = pb->width * header.BitsPerPixel / 8 + align;
+    pb->bitsperpixel = header.BitsPerPixel;
     //pb->pdata = (unsigned char*)malloc(pb->stride * pb->height);
-    pb->stride = header.Width * 3;
+    //pb->stride = header.Width * (header.BitsPerPixel / 8);
     pb->pdata = (unsigned char *)malloc(pb->stride * pb->height);
 
     printf("%d %d\n", header.DataOffset, header.BitsPerPixel);
+    printf("%d %d %d\n", pb->width, pb->height, pb->stride);
 
     fseek(fp, header.DataOffset, SEEK_SET);
     pb->pdata += pb->stride*pb->height;
@@ -333,11 +374,87 @@ int bmp_load(BMP *pb, char *file)
     return pb->pdata?0:-1;
 }
 
+void bmp_save(BMP *bp, FILE* fp)
+{
+    int i, j;
+    BMPFILEHEADER header;
+
+    header.Type = 0x4D42;
+    header.FileSize = (bp->width * bp->bitsperpixel * bp->height) / 8 + 54;
+    if(bp->bitsperpixel == 8)
+        header.FileSize += 1024;
+    else if(bp->bitsperpixel == 1)
+        header.FileSize += 8;
+    header.Reserved = 0;
+    header.DataOffset = 54;
+    if(bp->bitsperpixel == 8)
+        header.DataOffset += 1024;
+    else if(bp->bitsperpixel == 1)
+        header.DataOffset += 8;
+    header.HeaderSize = 0x28;
+    header.Width = bp->width;
+    header.Height = bp->height*(-1);
+    header.Planes = 1;
+    header.BitsPerPixel = bp->bitsperpixel;
+    header.Compression = 0;
+    header.ImageSize = bp->width * bp->bitsperpixel * bp->height / 8;
+    header.XPelsPerMeter = 0;
+    header.YPelsPerMeter = 0;
+    header.ColorUsed = 0;
+    if(bp->bitsperpixel == 8)
+        header.ColorUsed = 256;
+    else if(bp->bitsperpixel == 1)
+        header.ColorUsed = 2;
+    header.ColorImportant = 0;
+
+    //write header
+    fwrite(&header.Type, 1, 2, fp);
+    fwrite(&header.FileSize, 1, 4, fp);
+    fwrite(&header.Reserved, 1, 4, fp);
+    fwrite(&header.DataOffset, 1, 4, fp);
+    fwrite(&header.HeaderSize, 1, 4, fp);
+    fwrite(&header.Width, 1, 4, fp);
+    fwrite(&header.Height, 1, 4, fp);
+    fwrite(&header.Planes, 1, 2, fp);
+    fwrite(&header.BitsPerPixel, 1, 2, fp);
+    fwrite(&header.Compression, 1, 4, fp);
+    fwrite(&header.ImageSize, 1, 4, fp);
+    fwrite(&header.XPelsPerMeter, 1, 4, fp);
+    fwrite(&header.YPelsPerMeter, 1, 4, fp);
+    fwrite(&header.ColorUsed, 1, 4, fp);
+    fwrite(&header.ColorImportant, 1, 4, fp);
+
+    if(bp->bitsperpixel == 8)
+    {
+        for(int i = 0; i < 256; i ++)
+        {
+            fwrite(&i, sizeof(unsigned char), 1, fp);
+            fwrite(&i, sizeof(unsigned char), 1, fp);
+            fwrite(&i, sizeof(unsigned char), 1, fp);
+            fwrite("", sizeof(unsigned char), 1, fp);
+        }
+    }
+    else if(bp->bitsperpixel == 1)
+    {
+        int i = 0;
+        fwrite(&i, sizeof(unsigned char), 1, fp);
+        fwrite(&i, sizeof(unsigned char), 1, fp);
+        fwrite(&i, sizeof(unsigned char), 1, fp);
+        fwrite("", sizeof(unsigned char), 1, fp);
+        i = 255;
+        fwrite(&i, sizeof(unsigned char), 1, fp);
+        fwrite(&i, sizeof(unsigned char), 1, fp);
+        fwrite(&i, sizeof(unsigned char), 1, fp);
+        fwrite("", sizeof(unsigned char), 1, fp);
+    }
+}
+
 void File_Save(Stream *stream)
 {
     FILE *fp = fopen("encode", "wb");
     fwrite(stream->databuf, stream->stream_size, 1, fp);
     fclose(fp);
+    printf("file done\n");
 }
 
 int Get_Hash_key(unsigned char* str)
@@ -472,33 +589,38 @@ int Get_length_code(int length)
 int Get_dist_code(int distance)
 {
     int i = 0;
-    while(huffman_lens[i] < distance && i < 30)
+    while(huffman_dists[i] < distance && i < 30)
         i ++;
-    if(huffman_lens[i] != distance)
+    if(huffman_dists[i] != distance)
         i --;
 
     return i;
 }
 
-void gen_bitlen(Huffman_Table* table, int *bl_count, int *heap, int heap_max, int max_code)
+void gen_bitlen(Huffman_Table* table, int *bl_count, int *heap, int heap_max, int max_code, int size)
 {
     int i, j, k;
     int bits;
     int overflow = 0;
-    int heap_size = 2 * (256+1+29) + 1;
+    int heap_size = 2 * size + 1;
+    int limit = 0;
+    if(size == 19)
+        limit = 7;
+    else
+        limit = 15;
     for(i = 0; i < 15; i ++)
     {
         bl_count[i] = 0;
     }
-
+    //printf("heap_max = %d max_code = %d\n", heap_max, max_code);
     table[heap[heap_max]].code_len = 0;
 
     for(i = heap_max + 1; i < heap_size; i ++)
     {
         bits = table[table[heap[i]].dad].code_len + 1;
-        if(bits > 15)
+        if(bits > limit)
         {
-            bits = 15;
+            bits = limit;
             overflow ++;
         }
         table[heap[i]].code_len = bits;
@@ -506,26 +628,31 @@ void gen_bitlen(Huffman_Table* table, int *bl_count, int *heap, int heap_max, in
         if(heap[i] > max_code) continue;
 
         bl_count[bits] ++;
+        //printf("%d ", i);
     }
     if(overflow == 0){
-        printf("no overflow\n");
+        //printf("no overflow\n");
         return;
+    }
+    else
+    {
+        printf("overflow= %d\n", overflow);
     }
     
     do
     {
-        bits = 15 - 1;
+        bits = limit - 1;
         while (bl_count[bits] == 0) bits --;
         bl_count[bits] --;
         bl_count[bits+1] += 2;
-        bl_count[15] --;
+        bl_count[limit] --;
 
         overflow -= 2;
     } while(overflow > 0);
-    printf("123\n");
+    //printf("123\n");
 
     k = heap_size;
-    for(bits = 15; bits != 0; bits --)
+    for(bits = limit; bits != 0; bits --)
     {
         i = bl_count[bits];
         while(i != 0)
@@ -543,17 +670,24 @@ void gen_bitlen(Huffman_Table* table, int *bl_count, int *heap, int heap_max, in
 
 void gen_code(Huffman_Table* table, int *bl_count, int max_code)
 {
-    unsigned char next_code[16];
-    unsigned char code = 0;
+    int next_code[16]={0};
+    int code = 0;
     int bits;
     int n;
 
+    bl_count[0] == 0;
     for(bits = 1; bits <= 15; bits ++)
     {
         code = (code + bl_count[bits-1]) << 1;
         next_code[bits] = code;
     }
 
+    /*for(int o = 0; o < 16; o ++)
+    {
+        printf("%d ", next_code[o]);
+    }
+    printf("\n");*/
+    
     for(n = 0; n <= max_code; n ++)
     {
         int len = table[n].code_len;
@@ -586,7 +720,7 @@ void Build_Huffman_tree(Huffman_Table* table, int size, int *huf_max_code)
             table[i].code_len = 0;
         }
     }
-    printf("maxcode= %d, heap_len= %d\n", max_code, heap_len);
+    //printf("maxcode= %d, heap_len= %d\n", max_code, heap_len);
     *huf_max_code = max_code;
 
     for(i = heap_len/2; i >= 1; i --)
@@ -597,6 +731,8 @@ void Build_Huffman_tree(Huffman_Table* table, int size, int *huf_max_code)
         {
             printf("%d %d\n", heap[j], table[heap[j]].freq);
         }*/
+        //if(size == 19);
+        //printf("%d ", i);
     }
 
     int node = size;
@@ -624,18 +760,19 @@ void Build_Huffman_tree(Huffman_Table* table, int size, int *huf_max_code)
     }
     
     heap[--max] = heap[1];
+    //printf("huffman tree build complete\n");
     /*printf("max= %d\n", max);
     for(i = max; i < 2*size+1; i ++)
     {
         printf("%d \n", table[heap[i]].freq);
     }*/
 
-    gen_bitlen(table, bl_count, heap, max, max_code);
-    for(i = 0; i < 16; i ++)
+    gen_bitlen(table, bl_count, heap, max, max_code, size);
+    /*for(i = 0; i < 16; i ++)
     {
         printf("%d ", bl_count[i]);
     }
-    printf("\n");
+    printf("\n");*/
     gen_code(table, bl_count, max_code);
     /*for(i = 0; i < 10; i ++)
     {
@@ -703,12 +840,20 @@ void Scan_Huffman_tree(Huffman_Table* table, Huffman_Table* bl_tree, int max_cod
 int Build_Huffman_bl_tree
 (Huffman_Table* lit_huf_tree, Huffman_Table* dis_huf_tree, Huffman_Table* bl_tree, int lit_max_code, int dis_max_code)
 {
-    int *bl_max_code;
+    int bl_max_code;
     int i;
     Scan_Huffman_tree(lit_huf_tree, bl_tree, lit_max_code);
+    //printf("scan lit huffman tree done\n");
     Scan_Huffman_tree(dis_huf_tree, bl_tree, dis_max_code);
+    //printf("scan dis huffman tree done\n");
 
-    Build_Huffman_tree(bl_tree, 19, bl_max_code);
+    Build_Huffman_tree(bl_tree, 19, &bl_max_code);
+    //printf("bl_max_code=%d\n", bl_max_code);
+    /*for(i = 0; i < 19; i ++)
+    {
+        //printf("%d ", bl_tree[bl_order[i]].code_len);
+        //printf("%d %d %d\n", i, bl_tree[i].code_len, bl_tree[i].code);
+    }*/
 
     for(i = 18; i >= 3; i --)
     {
@@ -735,6 +880,7 @@ void Deflate_process_huffman_tree(Stream *OutStream, Huffman_Table* table, Huffm
         min_count = 3;
     }
     table[max_code+1].code_len = (unsigned char)0xffff;
+    //printf("1233\n");
 
     for(i = 0; i <= max_code; i ++)
     {
@@ -745,9 +891,10 @@ void Deflate_process_huffman_tree(Stream *OutStream, Huffman_Table* table, Huffm
             continue;
         else if(count < min_count)
         {
-            while(count > 1)
+            while(count >= 1)
             {
                 Put_Stream(OutStream, bl_table[curlen].code, bl_table[curlen].code_len);
+                //printf("x%d %d", bl_table[curlen].code, curlen);
                 count--;
             }
             count --;
@@ -757,19 +904,27 @@ void Deflate_process_huffman_tree(Stream *OutStream, Huffman_Table* table, Huffm
             if(curlen != prevlen)
             {
                 Put_Stream(OutStream, bl_table[curlen].code, bl_table[curlen].code_len);
+                count --;
+                //printf(" x%d %d", bl_table[curlen].code, curlen);
             }
             Put_Stream(OutStream, bl_table[16].code, bl_table[16].code_len);
+            //printf(" nx%d %d", bl_table[16].code, curlen);
             Put_Stream(OutStream, count-3, 2);
+            //printf(" %d", count);
         }
         else if(count <= 10)
         {
             Put_Stream(OutStream, bl_table[17].code, bl_table[17].code_len);
+            //printf(" 0x%d %d", bl_table[17].code, curlen);
             Put_Stream(OutStream, count-3, 3);
+            //printf(" %d", count);
         }
         else
         {
             Put_Stream(OutStream, bl_table[18].code, bl_table[18].code_len);
+            //printf(" 0x%d %d", bl_table[18].code, curlen);
             Put_Stream(OutStream, count-11, 7);
+            //printf(" %d", count);
         }
         
         count = 0;
@@ -790,6 +945,7 @@ void Deflate_process_huffman_tree(Stream *OutStream, Huffman_Table* table, Huffm
             min_count = 4;
         }
     }
+    //printf("\n");
 }
 
 void Deflate_process_queue(LZ_Queue *queue, Stream *OutStream, bool last_block, bool StaticOrDynamic,
@@ -807,11 +963,11 @@ Huffman_Table* l_table, Huffman_Table* d_table, Huffman_Table* bl_table, int l_m
         Put_Stream(OutStream, 1, 2);
     else
         Put_Stream(OutStream, 2, 2);
-    printf("last block = %d \n", last_block);
+    //printf("last block = %d \n", last_block);
     //printf("123\n");
     //printf("%d, %d, %d\n", queue->head->value.literal, queue->head->value.length, queue->head->value.distance);
     
-    if(StaticOrDynamic)
+    if(StaticOrDynamic == true)
     {
         Put_Stream(OutStream, l_max_code-257, 5);
         Put_Stream(OutStream, d_max_code-1, 5);
@@ -822,16 +978,16 @@ Huffman_Table* l_table, Huffman_Table* d_table, Huffman_Table* bl_table, int l_m
             Put_Stream(OutStream, bl_table[bl_order[i]].code_len, 3);
         }
 
-        Deflate_process_huffman_tree(OutStream, l_table, bl_table, l_max_code-1);
-        Deflate_process_huffman_tree(OutStream, d_table, bl_table, d_max_code-1);
+        Deflate_process_huffman_tree(OutStream, l_table, bl_table, l_max_code);
+        Deflate_process_huffman_tree(OutStream, d_table, bl_table, d_max_code);
     }
-
+    int count = 0;
     while(queue->head != NULL)
     {
-        i ++;
+        count ++;
         LZ_Value value = LZ_dequeue(queue);
         int size, code = 0;
-        //if(i == 1)
+        //if(count < 4)
             //printf("%d %d %d\n", value.literal, value.length, value.distance);
         if(value.length == 0)
         {
@@ -841,6 +997,8 @@ Huffman_Table* l_table, Huffman_Table* d_table, Huffman_Table* bl_table, int l_m
             {
                 code = l_table[value.literal].code;
                 size = l_table[value.literal].code_len;
+                //if(count < 4)
+                    //printf("%d %d\n", code, size);
             }
             Put_Stream(OutStream, code, size);
             //if(i == 1)
@@ -859,10 +1017,14 @@ Huffman_Table* l_table, Huffman_Table* d_table, Huffman_Table* bl_table, int l_m
             {
                 code = l_table[257+i].code;
                 size = l_table[257+i].code_len;
+                //if(count < 4)
+                    //printf("%d %d\n", code, size);
             }
             Put_Stream(OutStream, code, size);
             code = value.length - huffman_lens[i];
             size = huffman_len_bits[i];
+            //if(count < 4)
+                //printf("%d %d\n", code, size);
             Put_Stream(OutStream, code, size);
             
             i = 0;
@@ -870,21 +1032,30 @@ Huffman_Table* l_table, Huffman_Table* d_table, Huffman_Table* bl_table, int l_m
                 i ++;
             if(huffman_dists[i] != value.distance)
                 i --;
+
             if(StaticOrDynamic == false)
                 Put_Stream(OutStream, i, 5);
             else
             {
                 code = d_table[i].code;
                 size = d_table[i].code_len;
+                Put_Stream(OutStream, code, size);
+                //if(count < 4)
+                    //printf("%d %d %d\n", i, code, size);
             }
             code = value.distance - huffman_dists[i];
             size = huffman_dist_bits[i];
+            //if(count < 4)
+                //printf("%d %d\n", code, size);
             Put_Stream(OutStream, code, size);
         }
         //printf("123");
     }
-
-    Put_Stream(OutStream, 0, 7);
+    if(StaticOrDynamic == false)
+        Put_Stream(OutStream, 0, 7);
+    else
+        Put_Stream(OutStream, l_table[256].code, l_table[256].code_len);
+    
 } 
 
 void Inflate_process_queue(LZ_Queue *queue, FILE *f)
@@ -911,11 +1082,13 @@ void Inflate_process_queue(LZ_Queue *queue, FILE *f)
                 buf_size ++;
             }
         }
+        //printf("%d %d %d\n", value.literal, value.length, value.distance);
     }
+    //printf("123");
     fwrite(buf, sizeof(unsigned char), buf_size, f);
 }
 
-void deflate(BMP *pb)
+void deflate(BMP *pb) 
 {
     int data_tag = 0;
     Stream out;
@@ -1021,10 +1194,10 @@ void deflate(BMP *pb)
                     else
                     {
                         int distance = lab_start - longest_match_pos;
-                        //if(lab_start > 1000 && lab_start <= 2000 && data_tag <= INPUT_BLOCK_SIZE)
-                            //printf("%x, %x, %d, %d\n",lab_start, longest_match_pos, longest_match_len, lab_start - longest_match_pos);
+                        //if(data_tag > INPUT_BLOCK_SIZE*5 && data_tag <= INPUT_BLOCK_SIZE*6)
+                            //printf("%x %x %x, %x, %d, %d, %d\n",data_tag, cur_buf[0], lab_start, longest_match_pos, longest_match_len, distance, Get_length_code(longest_match_len));
                         LZ_enqueue(&lz_queue, 0, longest_match_len, lab_start - longest_match_pos);
-                        lit_huf_tab[Get_length_code(longest_match_len)].freq ++;
+                        lit_huf_tab[Get_length_code(longest_match_len)+256+1].freq ++;
                         dis_huf_tab[Get_dist_code(distance)].freq ++;
 
                         int final_pos = lab_start + longest_match_len;
@@ -1036,31 +1209,58 @@ void deflate(BMP *pb)
                             lab_start ++;
                         }
                         lab_start += 2;
-                        if(lab_start > 1000 && lab_start <= 2000 && data_tag <= INPUT_BLOCK_SIZE)
-                            printf("%x, %x\n",final_pos, lab_start);
+                        //if(lab_start > 1000 && lab_start <= 2000 && data_tag <= INPUT_BLOCK_SIZE)
+                            //printf("%x, %x\n",final_pos, lab_start);
                     }
                     
                 }
                 
             }
-            int j;
-            LZ_Queue_Node *tmp = lz_queue.head;
-            /*while(lab_start == 100 && data_tag == INPUT_BLOCK_SIZE)
-            {
-                printf("%d, %d, %d\n", tmp->value.literal, tmp->value.length, tmp->value.distance);
-                if(tmp == lz_queue.tail)
-                    break;
-                else
-                    tmp = tmp->next;
-            }*/
         }
+        int j;
+        LZ_Queue_Node *tmp = lz_queue.head;
+        while(data_tag == data_size)
+        {
+            //printf("%x, %x, %d, %d\n",data_tag, tmp->value.literal, tmp->value.length, tmp->value.distance);
+            if(tmp == lz_queue.tail)
+                break;
+            else
+                tmp = tmp->next;
+        }
+        //if(lab_start < 1000 && data_tag == INPUT_BLOCK_SIZE)
+            //printf("\n");
         int lit_max_code, dis_max_code;
         Build_Huffman_tree(lit_huf_tab, 256+1+29, &lit_max_code);
+        /*for(int o = 0; o <= lit_max_code; o ++)
+        {
+            if(lit_huf_tab[o].code_len != 0 && data_tag == INPUT_BLOCK_SIZE)
+                printf("%d %d %d\n", lit_huf_tab[o].code, lit_huf_tab[o].code_len, o);
+            //printf("%d ", lit_huf_tab[o].code_len);
+        }*/
         Build_Huffman_tree(dis_huf_tab, 30, &dis_max_code);
+        /*for(int o = 0; o <= dis_max_code; o ++)
+        {
+            if(dis_huf_tab[o].code_len != 0)
+                printf("%d %d %d\n", dis_huf_tab[o].code, dis_huf_tab[o].code_len, o);
+            //printf("%d ", dis_huf_tab[o].code_len);
+        }*/
+        //printf("\n");
         int bl_max_code = Build_Huffman_bl_tree(lit_huf_tab, dis_huf_tab, bl_tab, lit_max_code, dis_max_code);
+        if(data_tag == INPUT_BLOCK_SIZE*9)
+            printf("%d \n", bl_max_code);
+        for(int o = 0; o < 19; o ++)
+        {
+            //if(bl_tab[o].code_len != 0 && data_tag == INPUT_BLOCK_SIZE*8)
+                //printf("%d %d %d\n", bl_tab[o].code, bl_tab[o].code_len, o);
+            if(data_tag == INPUT_BLOCK_SIZE*9)
+                printf("%d ", bl_tab[o].code_len);
+        }
+        if(data_tag == INPUT_BLOCK_SIZE*9)
+            printf("lit_max_code= %d, dis_max_code= %d, bl_max_code= %d\n", lit_max_code, dis_max_code, bl_max_code);
         Deflate_process_queue(&lz_queue, &out, last_block, StaticOrDynamic, lit_huf_tab, dis_huf_tab, bl_tab, lit_max_code+1, dis_max_code+1, bl_max_code+1);
         Hash_Table_reset(lookup_table);
-        Huffman_Table_reset(lit_huf_tab, dis_huf_tab);
+        //Huffman_Table_reset(lit_huf_tab, dis_huf_tab);
+        init_Huffman_Table(lit_huf_tab, dis_huf_tab, bl_tab);
 
         if(data_size - data_tag >= INPUT_BLOCK_SIZE){
             block_size = INPUT_BLOCK_SIZE;
@@ -1070,13 +1270,13 @@ void deflate(BMP *pb)
         else
         {
             block_size = data_size - data_tag;
-            memcpy(block, pb->pdata, block_size);
-            printf("%d %d %d \n",last_block, data_tag, block_size);
+            memcpy(block, pb->pdata + data_tag, block_size);
+            //printf("%d %d %d \n",last_block, data_tag, block_size);
             data_tag = data_size;
         }
         //printf("%d ", data_tag);
     }
-    printf("%d \n", block_num);
+    //printf("%d \n", block_num);
     End_Stream(&out);
     for(int i = 0; i < 10; i ++)
     {
@@ -1085,7 +1285,7 @@ void deflate(BMP *pb)
     File_Save(&out);
 }
 
-void inflate(char *filename)
+void inflate(char *filename, BMP *pb)
 {
     Stream in;
     FILE *f = fopen(filename, "rb");
@@ -1093,17 +1293,20 @@ void inflate(char *filename)
     {
         printf("decode read fail");
     }
-    FILE *f_out = fopen("decode","wb");
+    FILE *f_out = fopen("decode1.bmp","wb");
+    bmp_save(pb, f_out);
     LZ_Queue lz_queue;
     init_LZ_Queue(&lz_queue);
     init_Stream(&in);
     in.bit_pos = 0;
     in.f = f;
+    in.databuf = (unsigned char*)malloc(pb->stride * pb->height);
     /*char i;
     fread(&i, sizeof(i), 1, in.f);
     printf("%x ", i);*/
 
     bool last_block = false;
+    int block_count = 0;
     
     while(!last_block)
     {
@@ -1114,8 +1317,10 @@ void inflate(char *filename)
         block_type *= 2;
         block_type += Get_bit(&in);*/
         
-        printf("%d %d\n", last_block, block_type);
-        if(block_type = STATIC_HUFFMAN_TYPE)
+        printf("last: %d type: %d\n", last_block, block_type);
+        block_count ++;
+
+        if(block_type == STATIC_HUFFMAN_TYPE)
         {
             bool block_finished = false;
 
@@ -1167,8 +1372,368 @@ void inflate(char *filename)
                 }
             }
         }
+        else if(block_type == DYNAMIC_HUFFMAN_TYPE)
+        {   
+            bool block_finished = false;
+            int i;
+            int max_code;
+            int bl_lens[19] = {0};
+            int l_lens[256+1+29] = {0};
+            int d_lens[30] = {0};
+            int bl_lens_offset[7] = {0};
+            int l_lens_offset[15] = {0};
+            int d_lens_offset[15] = {0};
+            int next_code[16] = {0};
+            int code = 0;
+
+            int l_size = Get_Stream(&in, 5) + 257;
+            int d_size = Get_Stream(&in, 5) + 1;
+            int bl_size = Get_Stream(&in, 4) + 4;
+
+            printf("l_size = %d, d_size= %d, bl_size = %d %d\n", l_size, d_size, bl_size, block_count);
+
+            Huffman_Decode_Table *bl_table = (Huffman_Decode_Table*)malloc(128 * sizeof(Huffman_Decode_Table));
+            Huffman_Decode_Table *l_table = (Huffman_Decode_Table*)malloc(32768 * sizeof(Huffman_Decode_Table));
+            Huffman_Decode_Table *d_table = (Huffman_Decode_Table*)malloc(32768 * sizeof(Huffman_Decode_Table));
+            
+            init_huffman_decode_table(bl_table, l_table, d_table);
+
+            for(i = 0; i < bl_size; i ++){
+                bl_lens[bl_order[i]] = Get_Stream(&in, 3);
+                //printf("%d ", bl_lens[i]);
+            }
+            //printf("\n");
+            
+            // build precode table
+            int bl_count[8] = {0};
+            for(i = 0; i < 19; i ++){
+                bl_count[bl_lens[i]] ++;
+                printf("%d ", bl_lens[i]);
+            }
+            
+            /*for(int o = 0; o < 7; o ++)
+            {
+                printf("%d ", bl_count[o]);
+            }
+            printf("\n");*/
+
+            for(max_code = 18; max_code >= 1; max_code --)
+                if(bl_lens[max_code] != 0)
+                    break;
+
+            code = 0;
+            bl_count[0] = 0;
+            for(i = 1; i <= 7; i ++)
+            {
+                code = (code + bl_count[i-1]) << 1;
+                next_code[i] = code;
+            }
+            /*for(int o = 1; o <= 7; o ++)
+            {
+                printf("%d ", next_code[o]);
+            }
+            printf("\n");*/
+
+            int bl_offset[7] = {0};
+            for(i = 0; i < 7; i ++)
+                bl_offset[i] = next_code[i];
+            for(i = 0; i < 19; i ++)
+            {
+                int len = bl_lens[i];
+                if(len == 0) continue;
+                bl_table[next_code[len]].code = i;
+                bl_table[next_code[len]].code_len = len;
+                //printf("%d %d %d\n", i, len, next_code[len]);
+                next_code[len]++;
+            }
+            printf("readbytes= %d\n", read_bytes);
+
+            //build lit table
+            for(i = 0; i < l_size;)
+            {
+                int j;
+                int len = 0;
+                code = 0;
+                int value = 0;
+
+                while(1)
+                {
+                    code += Get_bit(&in);
+                    len ++;
+                    if(bl_table[code].code_len == len && bl_table[code].code_len != 0)
+                    {
+                        value = bl_table[code].code;
+                        break;
+                    }
+                    code <<= 1;
+                    //printf("%d %d\n", code, len);
+                };
+                //printf("%d %d %d\n", value, code, len);
+                
+                if(value < 16)
+                {
+                    l_lens[i] = value;
+                    i ++;
+                }
+                else if(value == 16)
+                {
+                    int times = Get_Stream(&in, 2) + 3;
+                    for(j = 0; j < times; j ++)
+                    {
+                        l_lens[i] = l_lens[i-1];
+                        i ++;
+                    }
+                }
+                else if(value == 17)
+                {
+                    int times = Get_Stream(&in, 3) + 3;
+                    for(j = 0; j < times; j ++)
+                    {
+                        l_lens[i] = 0;
+                        i ++;
+                    }
+                }
+                else
+                {
+                    int times = Get_Stream(&in, 7) + 11;
+                    //printf("times = %d\n", times);
+                    for(j = 0; j < times; j ++)
+                    {
+                        l_lens[i] = 0;
+                        i ++;
+                    }
+                }
+            }
+
+            /*for (int o = 0; o < l_size; o++)
+            {
+                printf("%d ", l_lens[o]);
+                if(o % 32 == 0)
+                    printf("\n");
+            }*/
+            //printf("lit table");
+            for(i = 0; i < d_size;)
+            {
+                int j;
+                int len = 0;
+                code = 0;
+                int value = 0;
+
+                while(1)
+                {
+                    code += Get_bit(&in);
+                    len ++;
+                    if(bl_table[code].code_len == len && bl_table[code].code_len != 0)
+                    {
+                        value = bl_table[code].code;
+                        break;
+                    }
+                    code <<= 1;
+                };
+                //printf("%d %d %d\n", value, code, len);
+                
+                if(value < 16)
+                {
+                    d_lens[i] = value;
+                    i ++;
+                }
+                else if(value == 16)
+                {
+                    int times = Get_Stream(&in, 2) + 3;
+                    for(j = 0; j < times; j ++)
+                    {
+                        d_lens[i] = d_lens[i-1];
+                        i ++;
+                    }
+                }
+                else if(value == 17)
+                {
+                    int times = Get_Stream(&in, 3) + 3;
+                    for(j = 0; j < times; j ++)
+                    {
+                        d_lens[i] = 0;
+                        i ++;
+                    }
+                }
+                else
+                {
+                    int times = Get_Stream(&in, 7) + 11;
+                    for(j = 0; j < times; j ++)
+                    {
+                        d_lens[i] = 0;
+                        i ++;
+                    }
+                }
+            }
+
+            /*for (int o = 0; o < d_size; o++)
+            {
+                printf("%d ", d_lens[o]);
+                if(o % 32 == 0)
+                    printf("\n");
+            }*/
+
+            int l_count[16] = {0};
+            for(i = 0; i < (256+1+29); i ++)
+                l_count[l_lens[i]] ++;
+            
+            /*for(int o = 0; o < 16; o ++)
+                printf("%d ", l_count[o]);
+            printf("\n");*/
+
+            for(max_code = (256+1+29); max_code >= 1; max_code --)
+                if(l_lens[max_code] != 0)
+                    break;
+            //printf("l_max_code= %d\n", max_code);
+
+            code = 0;
+            l_count[0] = 0;
+            for(i = 1; i <= 15; i ++)
+            {
+                code = (code + l_count[i-1]) << 1;
+                next_code[i] = code;
+            }
+
+            int l_offset[16] = {0};
+            for(i = 0; i < 16; i ++)
+            {
+                l_offset[i] = next_code[i];
+                //printf("%d ", next_code[i]);
+            }
+            //printf("\n");
+            for(i = 0; i < (256+1+29); i ++)
+            {
+                int len = l_lens[i];
+                if(len == 0) continue;
+                l_table[next_code[len]].code = i;
+                l_table[next_code[len]].code_len = len;
+                //printf("%d %d %d\n", next_code[len], l_table[next_code[len]].code_len, i);
+                next_code[len]++;
+            }
+
+            //build dis table
+            int d_count[16] = {0};
+            for(i = 0; i < 30; i ++)
+                d_count[d_lens[i]] ++;
+            
+
+            for(max_code = 30; max_code >= 1; max_code --)
+                if(d_lens[max_code] != 0)
+                    break;
+            //printf("d_max_code= %d\n", max_code);
+
+            for(i = 0; i < 16; i ++)
+                next_code[i] = 0;
+
+            code = 0;
+            d_count[0] = 0;
+            for(i = 1; i <= 15; i ++)
+            {
+                code = (code + d_count[i-1]) << 1;
+                next_code[i] = code;
+            }
+
+            /*for(int o = 0; o < 30; o ++)
+            {
+                printf("%d ", d_lens[o]);
+            }
+            printf("\n");*/
+
+            int d_offset[16] = {0};
+            for(i = 0; i < 16; i ++)
+                d_offset[i] = next_code[i];
+                //printf("%d ", next_code[i]);
+            for(i = 0; i < 30; i ++)
+            {
+                int len = d_lens[i];
+                if(len == 0) continue;
+                d_table[next_code[len]].code = i;
+                d_table[next_code[len]].code_len = len;
+                //printf("%d %d %d\n", next_code[len], d_table[next_code[len]].code_len, i);
+                next_code[len]++;
+            }
+            //printf("123");
+            //printf("readbytes = %d %d %d\n", read_bytes, in.bit_pos, in.bytebuf);
+            while(!block_finished)
+            {
+                int i = 0;
+                int cur_code = 0;
+                int value = 0;
+                int len = 0;
+                //printf("123\n");
+                while(1)
+                {
+                    cur_code += Get_bit(&in);
+                    len ++;
+                    if(l_table[cur_code].code_len == len && l_table[cur_code].code_len != 0)
+                    {
+                        value = l_table[cur_code].code;
+                        break;
+                    }
+                    cur_code <<= 1;
+                }
+                //if(block_count == 3)
+                   //printf("%d %d %d\n", cur_code, value, len);
+
+                if(value == 256)
+                {
+                    block_finished = true;
+                }
+                else if(value <= 255)
+                {
+                    LZ_enqueue(&lz_queue, value, 0, 0);
+                    //printf("%d %d %d\n", value, 0, 0);
+                }
+                else
+                {
+                    int len_pos = value - 257;
+                    //printf("len_pos = %d\n", len_pos);
+                    unsigned char len_extra_bits = Get_Stream(&in, huffman_len_bits[len_pos]);
+                    int dist_code = 0;
+                    int dist_pos = 0;
+                    int dis_len = 0;
+                    while(1)
+                    {
+                        dist_code += Get_bit(&in);
+                        dis_len ++;
+                        if(d_table[dist_code].code_len == dis_len && d_table[dist_code].code_len != 0)
+                        {
+                            dist_pos = d_table[dist_code].code;
+                            break;
+                        }
+                        dist_code <<= 1;
+                    }
+                    //printf("dis_value: %d %d\n", dist_code, dist_pos);
+
+                    int dist_extra_bits = Get_Stream(&in, huffman_dist_bits[dist_pos]);
+
+                    LZ_enqueue(&lz_queue, 0, huffman_lens[len_pos] + len_extra_bits,
+                                             huffman_dists[dist_pos] + dist_extra_bits);
+                    
+                    //printf("%d %d %d\n", 0, huffman_lens[len_pos] + len_extra_bits, huffman_dists[dist_pos] + dist_extra_bits);
+                }
+
+            }
+            //printf("123");
+            free(bl_table);
+            free(l_table);
+            free(d_table);
+        }
+        int j = 0;
+        LZ_Queue_Node *tmp = lz_queue.head;
+        /*while(1)
+        {
+            //printf("%d, %d, %d\n", tmp->value.literal, tmp->value.length, tmp->value.distance);
+            if(tmp == lz_queue.tail){
+                //printf("123");
+                break;
+            }
+            else
+                tmp = tmp->next;
+        }*/
         printf("inflate process queue\n");
         Inflate_process_queue(&lz_queue, f_out);
+        //last_block = true;
     }
 
     printf("total read bytes : %d\n", read_bytes);
@@ -1176,35 +1741,18 @@ void inflate(char *filename)
 
 int main()
 {
-    char *input_file = "lena256.bmp";
+    char *input_file = "dsBuffer.bmp";
     BMP bmp={0};
     bmp_load(&bmp, input_file);
     //FILE *tmp = fopen("tmp", "wb");
     //fwrite(bmp.pdata, bmp.height*bmp.stride, 1, tmp);
-    for(int i = 0; i < 10; i ++)
+    /*for(int i = 0; i < 10; i ++)
     {
         //printf("%d ", bmp.pdata[i]);
     }
-    printf("\n");
+    printf("\n");*/
     deflate(&bmp);
-    //inflate("encode");
-    /*int size = (2*(256+1+29)+1);
-    Huffman_Table *table = (Huffman_Table*)malloc(size*sizeof(Huffman_Table));
-    for(int i = 0; i < size; i ++)
-    {
-        table[i].freq = 0;
-    }
-    for(int i = 0; i < 10; i ++)
-    {
-        table[i].freq += (10-i);
-        printf("%d ", table[i].freq);
-    }
-    printf("\n");
-    Build_Huffman_tree(table, 256+1+29);
-    for(int i = 0; i < 10; i ++)
-    {
-        //printf("%d %d\n", table[i].code, table[i].code_len);
-    }*/
+    inflate("encode", &bmp);
 }
 
 //zlib use heap to construct huffman tree, combine two smallest node and add to heap
